@@ -8,6 +8,7 @@ import 'package:geolocator/geolocator.dart' as geo;
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:torch_light/torch_light.dart';
+import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import 'config.dart';
 
@@ -273,6 +274,30 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
                       return {'enabled': enabled};
                     } catch (e) {
                       return {'enabled': true, 'error': e.toString()};
+                    }
+                  },
+                );
+                // Bank app deep link (khanbank://, socialpay-payment://, ...)
+                // neeh. window.location.href-eer shuud daaruulbal WebView
+                // dotor "webpage not found" gej aldaa garj bsn bolhor ingej hiile
+                controller.addJavaScriptHandler(
+                  handlerName: 'openExternalUrl',
+                  callback: (args) async {
+                    final urlString = args.isNotEmpty
+                        ? args[0] as String?
+                        : null;
+                    if (urlString == null || urlString.isEmpty) {
+                      return {'ok': false};
+                    }
+                    try {
+                      final uri = Uri.parse(urlString);
+                      final launched = await url_launcher.launchUrl(
+                        uri,
+                        mode: url_launcher.LaunchMode.externalApplication,
+                      );
+                      return {'ok': launched};
+                    } catch (e) {
+                      return {'ok': false, 'error': e.toString()};
                     }
                   },
                 );
