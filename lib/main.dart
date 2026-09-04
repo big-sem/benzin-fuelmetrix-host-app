@@ -46,6 +46,7 @@ Future<String> fetchPresignedUrl() async {
   // backend: `{ url: 'http://.../?token=...' }`.
   final body = jsonDecode(response.body) as Map<String, dynamic>;
   final url = body['url'] as String?;
+  print(url);
   if (url == null || url.isEmpty) {
     throw Exception('presigned-url response missing "url": $body');
   }
@@ -116,6 +117,14 @@ class MiniappWebViewScreen extends StatefulWidget {
 class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
   double _progress = 0;
   InAppWebViewController? _controller;
+  // Доорх Navigator.pop()-г хоёр удаа дуудагдахаас хамгаална — closeMiniapp
+  bool _isClosing = false;
+
+  void _popMiniapp() {
+    if (_isClosing || !mounted) return;
+    _isClosing = true;
+    Navigator.of(context).pop();
+  }
 
   // Presigned-URL fetch state — see fetchPresignedUrl() above. build() below
   // branches on these: null/null = loading, error set = failed (show retry),
@@ -150,7 +159,7 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
   Future<void> _handleBackGesture() async {
     final controller = _controller;
     if (controller == null) {
-      if (mounted) Navigator.of(context).pop();
+      _popMiniapp();
       return;
     }
 
@@ -161,7 +170,7 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
       controller.goBack();
       return;
     }
-    if (mounted) Navigator.of(context).pop();
+    _popMiniapp();
   }
 
   @override
@@ -211,144 +220,175 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
         _handleBackGesture();
       },
       child: Scaffold(
+        // Matches webview/src/theme.js's `background` token — Android's
+        // native WebView defaults to a black canvas until the page's first
+        // paint lands, so without this the black WebView briefly shows
+        // through on any slow load (cold Vite compile, slow network) before
+        // transparentBackground below lets this color show instead.
+        backgroundColor: const Color(0xFFF4F6F8),
         body: Stack(
           children: [
-            InAppWebView(
-              initialUrlRequest: URLRequest(url: WebUri(_resolvedUrl!)),
-              initialSettings: InAppWebViewSettings(
-                mediaPlaybackRequiresUserGesture: false,
-                allowsInlineMediaPlayback: true,
-                geolocationEnabled: true,
-                javaScriptEnabled: true,
-                domStorageEnabled: true,
-              ),
-              onWebViewCreated: (controller) {
-                _controller = controller;
-                // Close miniapp handler
-                controller.addJavaScriptHandler(
-                  handlerName: 'closeMiniapp',
-                  callback: (args) {
-                    if (mounted) Navigator.of(context).pop();
-                    return null;
-                  },
-                );
-                // Torch/flashlight function
-                controller.addJavaScriptHandler(
-                  handlerName: 'setTorch',
-                  callback: (args) async {
-                    final on = args.isNotEmpty && args[0] == true;
-                    try {
-                      if (on) {
-                        await TorchLight.enableTorch();
-                      } else {
-                        await TorchLight.disableTorch();
+            Container(
+              color: const Color(0xFFF4F6F8),
+              child: InAppWebView(
+                initialUrlRequest: URLRequest(url: WebUri(_resolvedUrl!)),
+                initialSettings: InAppWebViewSettings(
+                  mediaPlaybackRequiresUserGesture: false,
+                  allowsInlineMediaPlayback: true,
+                  geolocationEnabled: true,
+                  javaScriptEnabled: true,
+                  domStorageEnabled: true,
+                  transparentBackground: true,
+                ),
+                onWebViewCreated: (controller) {
+                  _controller = controller;
+                  // Close miniapp handler
+                  controller.addJavaScriptHandler(
+                    handlerName: 'closeMiniapp',
+                    callback: (args) {
+                      _popMiniapp();
+                      return null;
+                    },
+                  );
+                  // Torch/flashlight function
+                  controller.addJavaScriptHandler(
+                    handlerName: 'setTorch',
+                    callback: (args) async {
+                      final on = args.isNotEmpty && args[0] == true;
+                      try {
+                        if (on) {
+                          await TorchLight.enableTorch();
+                        } else {
+                          await TorchLight.disableTorch();
+                        }
+                        return {'ok': true};
+                      } catch (e) {
+                        return {'ok': false, 'error': e.toString()};
                       }
-                      return {'ok': true};
-                    } catch (e) {
-                      return {'ok': false, 'error': e.toString()};
-                    }
-                  },
-                );
-                // Webees location asaagagui uyd location assaah tohirgooni hesgig neeh
-                controller.addJavaScriptHandler(
-                  handlerName: 'openLocationSettings',
-                  callback: (args) async {
-                    try {
-                      await AppSettings.openAppSettings(
-                        type: AppSettingsType.location,
+                    },
+                  );
+                  // Webees location asaagagui uyd location assaah tohirgooni hesgig neeh
+                  controller.addJavaScriptHandler(
+                    handlerName: 'openLocationSettings',
+                    callback: (args) async {
+                      try {
+                        await AppSettings.openAppSettings(
+                          type: AppSettingsType.location,
+                        );
+                        return {'ok': true};
+                      } catch (e) {
+                        return {'ok': false, 'error': e.toString()};
+                      }
+                    },
+                  );
+                  // Neither iOS nor Android has a deep link straight to a
+                  // per-permission camera settings screen the way Android has
+                  // for Location — AppSettingsType.settings opens this app's
+                  // own Settings entry instead (Settings > <app> on iOS,
+                  // the App Info page on Android), where the Camera toggle
+                  // lives alongside every other permission. That's the
+                  // standard recovery path once a user has denied camera
+                  // permission and the OS won't re-prompt from JS anymore.
+                  controller.addJavaScriptHandler(
+                    handlerName: 'openCameraSettings',
+                    callback: (args) async {
+                      try {
+                        await AppSettings.openAppSettings(
+                          type: AppSettingsType.settings,
+                        );
+                        return {'ok': true};
+                      } catch (e) {
+                        return {'ok': false, 'error': e.toString()};
+                      }
+                    },
+                  );
+                  // OS түвшний Location Services toggle-ийг шууд, тэр даруй shalgah —
+                  // web navigator.geolocation-д delay garaad bga tul ashiglav
+                  controller.addJavaScriptHandler(
+                    handlerName: 'isLocationServicesEnabled',
+                    callback: (args) async {
+                      try {
+                        final enabled =
+                            await geo.Geolocator.isLocationServiceEnabled();
+                        return {'enabled': enabled};
+                      } catch (e) {
+                        return {'enabled': true, 'error': e.toString()};
+                      }
+                    },
+                  );
+                  // Bank app deep link (khanbank://, socialpay-payment://, ...)
+                  // neeh. window.location.href-eer shuud daaruulbal WebView
+                  // dotor "webpage not found" gej aldaa garj bsn bolhor ingej hiile
+                  controller.addJavaScriptHandler(
+                    handlerName: 'openExternalUrl',
+                    callback: (args) async {
+                      final urlString = args.isNotEmpty
+                          ? args[0] as String?
+                          : null;
+                      if (urlString == null || urlString.isEmpty) {
+                        return {'ok': false};
+                      }
+                      try {
+                        final uri = Uri.parse(urlString);
+                        final launched = await url_launcher.launchUrl(
+                          uri,
+                          mode: url_launcher.LaunchMode.externalApplication,
+                        );
+                        return {'ok': launched};
+                      } catch (e) {
+                        return {'ok': false, 'error': e.toString()};
+                      }
+                    },
+                  );
+                },
+                onProgressChanged: (controller, progress) {
+                  setState(() => _progress = progress / 100);
+                },
+                // Камер/микрофоны зөвшөөрөл — QR scanner-т (getUserMedia) хэрэгтэй
+                onPermissionRequest: (controller, request) async {
+                  final wantsCamera = request.resources.contains(
+                    PermissionResourceType.CAMERA,
+                  );
+                  final wantsMic = request.resources.contains(
+                    PermissionResourceType.MICROPHONE,
+                  );
+                  if (wantsCamera) {
+                    final status = await ph.Permission.camera.request();
+                    if (!status.isGranted) {
+                      return PermissionResponse(
+                        resources: request.resources,
+                        action: PermissionResponseAction.DENY,
                       );
-                      return {'ok': true};
-                    } catch (e) {
-                      return {'ok': false, 'error': e.toString()};
                     }
-                  },
-                );
-                // OS түвшний Location Services toggle-ийг шууд, тэр даруй shalgah —
-                // web navigator.geolocation-д delay garaad bga tul ashiglav
-                controller.addJavaScriptHandler(
-                  handlerName: 'isLocationServicesEnabled',
-                  callback: (args) async {
-                    try {
-                      final enabled =
-                          await geo.Geolocator.isLocationServiceEnabled();
-                      return {'enabled': enabled};
-                    } catch (e) {
-                      return {'enabled': true, 'error': e.toString()};
-                    }
-                  },
-                );
-                // Bank app deep link (khanbank://, socialpay-payment://, ...)
-                // neeh. window.location.href-eer shuud daaruulbal WebView
-                // dotor "webpage not found" gej aldaa garj bsn bolhor ingej hiile
-                controller.addJavaScriptHandler(
-                  handlerName: 'openExternalUrl',
-                  callback: (args) async {
-                    final urlString = args.isNotEmpty
-                        ? args[0] as String?
-                        : null;
-                    if (urlString == null || urlString.isEmpty) {
-                      return {'ok': false};
-                    }
-                    try {
-                      final uri = Uri.parse(urlString);
-                      final launched = await url_launcher.launchUrl(
-                        uri,
-                        mode: url_launcher.LaunchMode.externalApplication,
+                  }
+                  if (wantsMic) {
+                    final status = await ph.Permission.microphone.request();
+                    if (!status.isGranted) {
+                      return PermissionResponse(
+                        resources: request.resources,
+                        action: PermissionResponseAction.DENY,
                       );
-                      return {'ok': launched};
-                    } catch (e) {
-                      return {'ok': false, 'error': e.toString()};
                     }
-                  },
-                );
-              },
-              onProgressChanged: (controller, progress) {
-                setState(() => _progress = progress / 100);
-              },
-              // Камер/микрофоны зөвшөөрөл — QR scanner-т (getUserMedia) хэрэгтэй
-              onPermissionRequest: (controller, request) async {
-                final wantsCamera = request.resources.contains(
-                  PermissionResourceType.CAMERA,
-                );
-                final wantsMic = request.resources.contains(
-                  PermissionResourceType.MICROPHONE,
-                );
-                if (wantsCamera) {
-                  final status = await ph.Permission.camera.request();
-                  if (!status.isGranted) {
-                    return PermissionResponse(
-                      resources: request.resources,
-                      action: PermissionResponseAction.DENY,
-                    );
                   }
-                }
-                if (wantsMic) {
-                  final status = await ph.Permission.microphone.request();
-                  if (!status.isGranted) {
-                    return PermissionResponse(
-                      resources: request.resources,
-                      action: PermissionResponseAction.DENY,
-                    );
-                  }
-                }
-                return PermissionResponse(
-                  resources: request.resources,
-                  action: PermissionResponseAction.GRANT,
-                );
-              },
-              // Байршлын зөвшөөрөл — station хайхад (navigator.geolocation.watchPosition)
-              // хэрэгтэй. Дээрх камер шиг л native-runtime зөвшөөрөл: эхлээд
-              // permission_handler-аар асууж, OS бодитоор зөвшөөрсөн үед л WebView-д
-              // "зөвшөөрөгдсөн" гэж хэлнэ.
-              // retain заавал false байх ёстой.(retain: true uyd gantshan udaa duudagdaj bsn)
-              onGeolocationPermissionsShowPrompt: (controller, origin) async {
-                final status = await ph.Permission.location.request();
-                return GeolocationPermissionShowPromptResponse(
-                  origin: origin,
-                  allow: status.isGranted,
-                  retain: false,
-                );
-              },
+                  return PermissionResponse(
+                    resources: request.resources,
+                    action: PermissionResponseAction.GRANT,
+                  );
+                },
+                // Байршлын зөвшөөрөл — station хайхад (navigator.geolocation.watchPosition)
+                // хэрэгтэй. Дээрх камер шиг л native-runtime зөвшөөрөл: эхлээд
+                // permission_handler-аар асууж, OS бодитоор зөвшөөрсөн үед л WebView-д
+                // "зөвшөөрөгдсөн" гэж хэлнэ.
+                // retain заавал false байх ёстой.(retain: true uyd gantshan udaa duudagdaj bsn)
+                onGeolocationPermissionsShowPrompt: (controller, origin) async {
+                  final status = await ph.Permission.location.request();
+                  return GeolocationPermissionShowPromptResponse(
+                    origin: origin,
+                    allow: status.isGranted,
+                    retain: false,
+                  );
+                },
+              ),
             ),
             // Positioned below the status bar explicitly, since the WebView
             // itself now draws edge-to-edge
