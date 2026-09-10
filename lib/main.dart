@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:http/http.dart' as http;
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:torch_light/torch_light.dart';
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
@@ -26,7 +27,10 @@ void main() {
   runApp(const FuelmetrixHostApp());
 }
 
-Future<String> fetchPresignedUrl() async {
+Future<String> fetchPresignedUrl({
+  required String qrCode,
+  required String name,
+}) async {
   final response = await http.post(
     Uri.parse(presignedUrlEndpoint),
     headers: {'Content-Type': 'application/json'},
@@ -45,11 +49,22 @@ Future<String> fetchPresignedUrl() async {
 
   // backend: `{ url: 'http://.../?token=...' }`.
   final body = jsonDecode(response.body) as Map<String, dynamic>;
-  final url = body['url'] as String?;
-  print(url);
-  if (url == null || url.isEmpty) {
+  final baseUrl = body['url'] as String?;
+  if (baseUrl == null || baseUrl.isEmpty) {
     throw Exception('presigned-url response missing "url": $body');
   }
+
+  // Direct QR-scan entry flow: append the natively-scanned pump QR value
+  // (plus a display name, informational-only) onto this same presigned URL
+  // — a client-side append, not a backend contract change. The webview's
+  // App.vue onMounted reads `qrCode` off this exact query string to jump
+  // straight to fuel selection instead of showing Home.
+  final uri = Uri.parse(baseUrl);
+  final merged = uri.replace(
+    queryParameters: {...uri.queryParameters, 'qrCode': qrCode, 'name': name},
+  );
+  final url = merged.toString();
+  print(url);
   return url;
 }
 
@@ -89,10 +104,25 @@ class HostHomeScreen extends StatelessWidget {
               const Text('Flutter main app', textAlign: TextAlign.center),
               const SizedBox(height: 24),
               FilledButton.icon(
-                onPressed: () {
+                onPressed: () async {
+                  // Direct QR-scan entry flow: scan the pump QR natively
+                  // first (demoQrCode bypasses the camera for quick testing
+                  // — see config.dart), then hand the decoded value + a
+                  // display name to the webview via the presigned URL (see
+                  // fetchPresignedUrl above).
+                  final code =
+                      demoQrCode ??
+                      await Navigator.of(context).push<String>(
+                        MaterialPageRoute(
+                          builder: (_) => const QrScanScreen(),
+                        ),
+                      );
+                  if (code == null || code.isEmpty) return;
+                  if (!context.mounted) return;
                   Navigator.of(context).push(
                     MaterialPageRoute(
-                      builder: (_) => const MiniappWebViewScreen(),
+                      builder: (_) =>
+                          MiniappWebViewScreen(qrCode: code, name: demoName),
                     ),
                   );
                 },
@@ -107,8 +137,57 @@ class HostHomeScreen extends StatelessWidget {
   }
 }
 
+// Direct QR-scan entry flow: scans a pump's QR code with the device camera
+// (mobile_scanner) before the webview is ever opened — replaces the old
+// in-webview getUserMedia scanner (webview/src/pages/refuel/QrScanner.vue,
+// still intact but unreachable — see webview/src/router/index.js) for this
+// flow. Pops with the decoded raw value, or null if the user backs out.
+class QrScanScreen extends StatefulWidget {
+  const QrScanScreen({super.key});
+
+  @override
+  State<QrScanScreen> createState() => _QrScanScreenState();
+}
+
+class _QrScanScreenState extends State<QrScanScreen> {
+  // MobileScanner can fire onDetect repeatedly for the same frame/code
+  // before the pop actually unmounts this screen — guard against popping
+  // more than once.
+  bool _handled = false;
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_handled || capture.barcodes.isEmpty) return;
+    final value = capture.barcodes.first.rawValue;
+    if (value == null || value.isEmpty) return;
+    _handled = true;
+    Navigator.of(context).pop(value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: const Text('Scan pump QR code'),
+      ),
+      body: MobileScanner(onDetect: _onDetect),
+    );
+  }
+}
+
 class MiniappWebViewScreen extends StatefulWidget {
-  const MiniappWebViewScreen({super.key});
+  const MiniappWebViewScreen({
+    super.key,
+    required this.qrCode,
+    required this.name,
+  });
+
+  // The natively-scanned pump QR value and a display name — see
+  // fetchPresignedUrl() above, which appends both onto the presigned URL.
+  final String qrCode;
+  final String name;
 
   @override
   State<MiniappWebViewScreen> createState() => _MiniappWebViewScreenState();
@@ -144,7 +223,10 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
       _fetchError = null;
     });
     try {
-      final url = await fetchPresignedUrl();
+      final url = await fetchPresignedUrl(
+        qrCode: widget.qrCode,
+        name: widget.name,
+      );
       if (mounted) setState(() => _resolvedUrl = url);
     } catch (error) {
       if (mounted) setState(() => _fetchError = error);
