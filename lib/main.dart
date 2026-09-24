@@ -262,6 +262,27 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
       return;
     }
 
+    // Some screens (e.g. PaymentSuccess.vue, mid-dispense) need to block the
+    // hardware back button entirely rather than let this call navigate the
+    // native WebView first and rely on the page's own vue-router
+    // onBeforeRouteLeave guard to undo it afterwards — a real race was
+    // confirmed on-device: controller.goBack() below commits the native
+    // history change immediately and independently of the page's JS, so by
+    // the time that guard reacts to the resulting popstate, the user has
+    // already visibly landed on the previous (stale) screen. Check the
+    // page's own flag (webview/src/hardware-back-guard.js) BEFORE ever
+    // calling goBack() — if it's blocked, skip the native navigation
+    // entirely and let the page handle the gesture itself instead.
+    final blocked = await controller.evaluateJavascript(
+      source: 'window.__blockHardwareBack === true',
+    );
+    if (blocked == true) {
+      controller.evaluateJavascript(
+        source: "window.dispatchEvent(new CustomEvent('hardware-back'))",
+      );
+      return;
+    }
+
     final currentUrl = await controller.getUrl();
     final path = currentUrl?.path ?? '';
     final isHome = path.isEmpty || path == '/';
