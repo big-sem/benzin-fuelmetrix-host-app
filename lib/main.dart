@@ -30,6 +30,7 @@ void main() {
 Future<String> fetchPresignedUrl({
   required String qrCode,
   required String name,
+  required String plateNumber,
 }) async {
   final response = await http.post(
     Uri.parse(presignedUrlEndpoint),
@@ -55,17 +56,26 @@ Future<String> fetchPresignedUrl({
   }
 
   // Direct QR-scan entry flow: append the natively-scanned pump QR value
-  // (plus a display name, informational-only) onto this same presigned URL
-  // — a client-side append, not a backend contract change. The webview's
+  // (plus a display name and plate number, both informational-only/demo for
+  // now — see config.dart's demoPlateNumber) onto this same presigned URL —
+  // a client-side append, not a backend contract change. The webview's
   // App.vue onMounted reads `qrCode` off this exact query string to jump
-  // straight to fuel selection instead of showing Home.
+  // straight to fuel selection instead of showing Home; SelectFuel.vue reads
+  // `plateNumber` for the vehicle-info card.
   final uri = Uri.parse(baseUrl);
+  final devOrigin = useLocalDevServer ? Uri.parse(localDevServerOrigin) : null;
   final merged = uri.replace(
-    queryParameters: {...uri.queryParameters, 'qrCode': qrCode, 'name': name},
+    scheme: devOrigin?.scheme,
+    host: devOrigin?.host,
+    port: devOrigin?.hasPort == true ? devOrigin!.port : null,
+    queryParameters: {
+      ...uri.queryParameters,
+      'qrCode': qrCode,
+      'name': name,
+      'plateNumber': plateNumber,
+    },
   );
-  final url = merged.toString();
-  print(url);
-  return url;
+  return merged.toString();
 }
 
 class FuelmetrixHostApp extends StatelessWidget {
@@ -121,8 +131,11 @@ class HostHomeScreen extends StatelessWidget {
                   if (!context.mounted) return;
                   Navigator.of(context).push(
                     MaterialPageRoute(
-                      builder: (_) =>
-                          MiniappWebViewScreen(qrCode: code, name: demoName),
+                      builder: (_) => MiniappWebViewScreen(
+                        qrCode: code,
+                        name: demoName,
+                        plateNumber: demoPlateNumber,
+                      ),
                     ),
                   );
                 },
@@ -182,12 +195,15 @@ class MiniappWebViewScreen extends StatefulWidget {
     super.key,
     required this.qrCode,
     required this.name,
+    required this.plateNumber,
   });
 
-  // The natively-scanned pump QR value and a display name — see
-  // fetchPresignedUrl() above, which appends both onto the presigned URL.
+  // The natively-scanned pump QR value, a display name, and a plate number —
+  // see fetchPresignedUrl() above, which appends all three onto the
+  // presigned URL.
   final String qrCode;
   final String name;
+  final String plateNumber;
 
   @override
   State<MiniappWebViewScreen> createState() => _MiniappWebViewScreenState();
@@ -226,6 +242,7 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
       final url = await fetchPresignedUrl(
         qrCode: widget.qrCode,
         name: widget.name,
+        plateNumber: widget.plateNumber,
       );
       if (mounted) setState(() => _resolvedUrl = url);
     } catch (error) {
@@ -479,7 +496,17 @@ class _MiniappWebViewScreenState extends State<MiniappWebViewScreen> {
                 top: MediaQuery.of(context).padding.top,
                 left: 0,
                 right: 0,
-                child: LinearProgressIndicator(value: _progress, minHeight: 2),
+                // Explicit green, not the app's Material colorScheme default
+                // (derived from FuelmetrixHostApp's orange colorSchemeSeed) —
+                // that read as a yellowish-orange line at the very top of
+                // every screen, clashing with the redesigned webview's green
+                // accent everywhere else.
+                child: LinearProgressIndicator(
+                  value: _progress,
+                  minHeight: 2,
+                  color: const Color(0xFF4CA154),
+                  backgroundColor: const Color(0xFF4CA154).withValues(alpha: 0.15),
+                ),
               ),
           ],
         ),
